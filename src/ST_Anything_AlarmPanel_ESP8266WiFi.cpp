@@ -1,5 +1,5 @@
 //******************************************************************************************
-//  File: ST_Anything_Multiples_ESP8266WiFi.ino
+//  File: ST_Anything_AlarmPanel_ESP8266WiFi.ino
 //  Authors: Dan G Ogorchock & Daniel J Ogorchock (Father and Son)
 //
 //  Summary:  This Arduino Sketch, along with the ST_Anything library and the revised SmartThings
@@ -8,30 +8,23 @@
 //            The ST_Anything library takes care of all of the work to schedule device updates
 //            as well as all communications with the NodeMCU ESP8266's WiFi.
 //
-//            ST_Anything_Multiples implements the following ST Capabilities as a demo of what is possible with a single NodeMCU ESP8266
-//              - 1 x Alarm device (using a simple digital output)
-//              - 1 x Contact Sensor devices (used to monitor magnetic door sensors)
-//              - 1 x Switch devices (used to turn on a digital output (e.g. LED, relay, etc...)
-//              - 1 x Motion devices (used to detect motion)
+//            ST_Anything_AlarmPanel implements the following ST Capabilities as a demo of replacing an alarm panel with a single NodeMCU ESP8266
+//              - 7 x Contact Sensor devices (used to monitor magnetic door sensors)
+//              - 1 x Motion device (using simple digital input)
 //              - 1 x Smoke Detector devices (using simple digital input)
-//              - 1 x Temperature Measurement devices (Temperature from Dallas Semi 1-Wire DS18B20 device)
-//              - 1 x Relay Switch devices (used to turn on a digital output for a set number of cycles And On/Off times (e.g.relay, etc...))
-//              - 2 x Button devices (sends "pushed" if held for less than 1 second, else sends "held"
-//              - 1 x Water Sensor devices (using the 1 analog input pin to measure voltage from a water detector board)
+//              - 1 x Alarm (Siren only) device (using a simple digital output attached to a relay)
 //
 //  Change History:
 //
 //    Date        Who            What
 //    ----        ---            ----
-//    2015-01-03  Dan & Daniel   Original Creation
-//    2017-02-12  Dan Ogorchock  Revised to use the new SMartThings v2.0 library
-//    2017-04-17  Dan Ogorchock  New example showing use of Multiple device of same ST Capability
-//                               used with new Parent/Child Device Handlers (i.e. Composite DH)
-//    2017-05-25  Dan Ogorchock  Revised example sketch, taking into account limitations of NodeMCU GPIO pins
+//    2017-04-26  Dan Ogorchock  Original Creation
+//    2018-02-09  Dan Ogorchock  Added support for Hubitat Elevation Hub
 //
 //******************************************************************************************
-#include <SPI.h>
-#include "secrets.h"
+#include <SPI.h>	 // Adafruit MAX31855 library requires SPI.h
+#include "secrets.h" // include this file for external parameters like WIFI password etc.
+
 //******************************************************************************************
 // SmartThings Library for ESP8266WiFi
 //******************************************************************************************
@@ -48,27 +41,26 @@
 #include <PollingSensor.h>   //Generic Polling "Sensor" Class, polls Arduino pins periodically
 #include <Everything.h>      //Master Brain of ST_Anything library that ties everything together and performs ST Shield communications
 
-#include <PS_Illuminance.h> //Implements a Polling Sensor (PS) to measure light levels via a photo resistor
-
+#include <PS_Illuminance.h>         //Implements a Polling Sensor (PS) to measure light levels via a photo resistor on an analog input pin
+#include <PS_Voltage.h>             //Implements a Polling Sensor (PS) to measure voltage on an analog input pin
 #include <PS_TemperatureHumidity.h> //Implements a Polling Sensor (PS) to measure Temperature and Humidity via DHT library
-#include <PS_DS18B20_Temperature.h> //Implements a Polling Sesnor (PS) to measure Temperature via DS18B20 libraries
-#include <PS_Water.h>               //Implements a Polling Sensor (PS) to measure presence of water (i.e. leak detector)
-#include <IS_Motion.h>              //Implements an Interrupt Sensor (IS) to detect motion via a PIR sensor
+#include <PS_Water.h>               //Implements a Polling Sensor (PS) to measure presence of water (i.e. leak detector) on an analog input pin
+#include <IS_Motion.h>              //Implements an Interrupt Sensor (IS) to detect motion via a PIR sensor on a digital input pin
 #include <IS_Contact.h>             //Implements an Interrupt Sensor (IS) to monitor the status of a digital input pin
 #include <IS_Smoke.h>               //Implements an Interrupt Sensor (IS) to monitor the status of a digital input pin
+#include <IS_CarbonMonoxide.h>      //Implements an Interrupt Sensor (IS) to monitor the status of a digital input pin
 #include <IS_DoorControl.h>         //Implements an Interrupt Sensor (IS) and Executor to monitor the status of a digital input pin and control a digital output pin
 #include <IS_Button.h>              //Implements an Interrupt Sensor (IS) to monitor the status of a digital input pin for button presses
 #include <EX_Switch.h>              //Implements an Executor (EX) via a digital output to a relay
-#include <EX_Alarm.h>               //Implements Executor (EX)as an Alarm Siren capability via a digital output to a relay
-#include <S_TimedRelay.h>           //Implements a Sensor to control a digital output pin with timing capabilities
-#include <EX_RCSwitch.h>            //Implements the Executor (EX) as an RCSwitch object
+#include <EX_Alarm.h>               //Implements Executor (EX)as an Alarm capability with Siren and Strobe via digital outputs to relays
+#include <S_TimedRelay.h>           //Implements a Sensor to control a digital output pin with timing/cycle repeat capabilities
 
 //*************************************************************************************************
 //NodeMCU v1.0 ESP8266-12e Pin Definitions (makes it much easier as these match the board markings)
 //*************************************************************************************************
 #define LED_BUILTIN 16
 #define BUILTIN_LED 16
-//
+
 #define D0 16 //no internal pullup resistor
 #define D1 5
 #define D2 4
@@ -77,44 +69,34 @@
 #define D5 14
 #define D6 12
 #define D7 13
-#define D8 15  //must not be pulled high during power on/reset
-#define D9 3   // RX0 (Serial console)
-#define D10 1  // TX0 (Serial console)
-#define D11 9  // SD2
-#define D13 10 // SD3
+#define D8 15 //must not be pulled high during power on/reset
 
 //******************************************************************************************
 //Define which Arduino Pins will be used for each device
 //******************************************************************************************
-#define PIN_WATER_1 A0 //NodeMCU ESP8266 only has one Analog Input Pin 'A0'
 
-#define PIN_ALARM_1 D0             //SmartThings Capabilty "Alarm"
-#define PIN_SWITCH_1 D1            //SmartThings Capability "Switch"
-#define PIN_CONTACT_1 D2           //SmartThings Capabilty "Contact Sensor"
-#define PIN_BUTTON_1 D3            //SmartThings Capabilty Button / Holdable Button (Normally Open!)
-#define PIN_BUTTON_2 D4            //SmartThings Capabilty Button / Holdable Button (Normally Open!)
-#define PIN_MOTION_1 D5            //SmartThings Capabilty "Motion Sensor" (HC-SR501 PIR Sensor)
-#define PIN_SMOKE_1 D6             //SmartThings Capabilty "Smoke Detector"
-#define PIN_TEMPERATURE_1 D7       //SmartThings Capabilty "Temperature Measurement" (Dallas Semiconductor DS18B20)
-#define PIN_TEMPERATUREHUMIDITY D7 //SmartThings Capabilty "Temperature and Humidity Measurement" (DHT11 and DHT22)
-#define PIN_TIMEDRELAY_1 D8        //SmartThings Capability "Relay Switch"
-
-#define PIN_RCSWITCH D9 // 3 = D9/RX on nodemcu, 1 = D10/TX on nodmcu
+#define PIN_ALARM_1 D0   //SmartThings Capabilty "Alarm"
+#define PIN_CONTACT_1 D1 //SmartThings Capabilty "Contact Sensor"
+#define PIN_CONTACT_2 D2 //SmartThings Capabilty "Contact Sensor"
+#define PIN_CONTACT_3 D5 //SmartThings Capabilty "Contact Sensor"
+#define PIN_CONTACT_4 D6 //SmartThings Capabilty "Contact Sensor"
+#define PIN_CONTACT_5 D7 //SmartThings Capabilty "Contact Sensor"
 
 //******************************************************************************************
 //ESP8266 WiFi Information
 //******************************************************************************************
-String str_ssid = WIFI_SSID;                 //  <---You must edit this line!
-String str_password = WIFI_PASSWORD;         //  <---You must edit this line!
-IPAddress ip(DEVICE_IP_ADDRESS);             //Device IP Address       //  <---You must edit this line!
-IPAddress gateway(ROUTER_GATEWAY);           //Router gateway          //  <---You must edit this line!
-IPAddress subnet(LAN_SUBNET);                //LAN subnet mask         //  <---You must edit this line!
-IPAddress dnsserver(DNS_SERVER);             //DNS server              //  <---You must edit this line!
-const unsigned int serverPort = SERVER_PORT; // port to run the http server on
+String str_ssid = WIFI_SSID;                 //WIFI SSID						// read from secrets.h
+String str_password = WIFI_PASSWORD;         //WIFI Password				// read from secrets.h
+IPAddress ip(DEVICE_IP_ADDRESS);             //Device IP Address		// read from secrets.h
+IPAddress gateway(ROUTER_GATEWAY);           //Router gateway				// read from secrets.h
+IPAddress subnet(LAN_SUBNET);                //LAN subnet mask			// read from secrets.h
+IPAddress dnsserver(DNS_SERVER);             //DNS server						// read from secrets.h
+const unsigned int serverPort = SERVER_PORT; // port to run the http server on // read from secrets.h
 
-// Smartthings Hub Information
-IPAddress hubIp(HUB_IP_ADDRESS);       // smartthings hub ip      //  <---You must edit this line!
-const unsigned int hubPort = HUB_PORT; // smartthings hub port
+// Smartthings / Hubitat Hub TCP/IP Address
+IPAddress hubIp(HUB_IP_ADDRESS); // smartthings hub ip				// read from secrets.h
+// SmartThings / Hubitat Hub TCP/IP Address: UNCOMMENT line that corresponds to your hub, COMMENT the other
+const unsigned int hubPort = HUB_PORT; // smartthings or hubitat hub port (smartthings usually 39500, hubitat 39501)
 
 //******************************************************************************************
 //st::Everything::callOnMsgSend() optional callback routine.  This is a sniffer to monitor
@@ -123,8 +105,8 @@ const unsigned int hubPort = HUB_PORT; // smartthings hub port
 //******************************************************************************************
 void callback(const String &msg)
 {
-  Serial.print(F("ST_Anything Callback: Sniffed data = "));
-  Serial.println(msg);
+  //  Serial.print(F("ST_Anything Callback: Sniffed data = "));
+  //  Serial.println(msg);
 
   //TODO:  Add local logic here to take action when a device's value/state is changed
 
@@ -155,27 +137,16 @@ void setup()
   //           to match your specific use case in the ST Phone Application.
   //******************************************************************************************
   //Polling Sensors
-  static st::PS_Water sensor1(F("water1"), 60, 20, PIN_WATER_1, 200);
-  //static st::PS_DS18B20_Temperature sensor2(F("temperature1"), 15, 0, PIN_TEMPERATURE_1, false, 10, 1);
-  static st::PS_TemperatureHumidity sensor2(F("temphumid1"), 120, 10, PIN_TEMPERATUREHUMIDITY, st::PS_TemperatureHumidity::DHT11, F("temperature1"), F("humidity1"), true);
 
   //Interrupt Sensors
-  static st::IS_Contact sensor3(F("contact1"), PIN_CONTACT_1, LOW, true);
-  static st::IS_Button sensor4(F("button1"), PIN_BUTTON_1, 1000, LOW, true, 500);
-  static st::IS_Button sensor5(F("button2"), PIN_BUTTON_2, 1000, LOW, true, 500);
-  static st::IS_Motion sensor6(F("motion1"), PIN_MOTION_1, HIGH, false);
-  static st::IS_Smoke sensor7(F("smoke1"), PIN_SMOKE_1, HIGH, true, 500);
-
-  //Special sensors/executors (uses portions of both polling and executor classes)
-  static st::S_TimedRelay sensor8(F("relaySwitch1"), PIN_TIMEDRELAY_1, LOW, false, 3000, 0, 1);
+  static st::IS_Contact sensor1(F("contact1"), PIN_CONTACT_1, LOW, true, 500);
+  static st::IS_Contact sensor2(F("contact2"), PIN_CONTACT_2, LOW, true, 500);
+  static st::IS_Contact sensor3(F("contact3"), PIN_CONTACT_3, LOW, true, 500);
+  static st::IS_Contact sensor4(F("contact4"), PIN_CONTACT_4, LOW, true, 500);
+  static st::IS_Contact sensor5(F("contact5"), PIN_CONTACT_5, LOW, true, 500);
 
   //Executors
-  static st::EX_Alarm executor1(F("alarm1"), PIN_ALARM_1, LOW, true);
-  static st::EX_Switch executor2(F("switch1"), PIN_SWITCH_1, LOW, true); //Inverted logic for "Active Low" Relay Board
-
-  // Add support for RF 433 Switches:
-  static st::EX_RCSwitch executor3(F("switch2"), PIN_RCSWITCH, "0000011010100110100101100110010110101010100110101010", "0000011010100110100101100110010110101010100101010101", 9, 4, LOW);
-  static st::EX_RCSwitch executor4(F("switch3"), PIN_RCSWITCH, "1001100101101010100101101010011001011001100110100110010110101010", "0", 8, 10, LOW);
+  static st::EX_Alarm executor1(F("alarm1"), PIN_ALARM_1, LOW, false);
 
   //*****************************************************************************
   //  Configure debug print output from each main class
@@ -213,17 +184,11 @@ void setup()
   st::Everything::addSensor(&sensor3);
   st::Everything::addSensor(&sensor4);
   st::Everything::addSensor(&sensor5);
-  st::Everything::addSensor(&sensor6);
-  st::Everything::addSensor(&sensor7);
-  st::Everything::addSensor(&sensor8);
 
   //*****************************************************************************
   //Add each executor to the "Everything" Class
   //*****************************************************************************
   st::Everything::addExecutor(&executor1);
-  st::Everything::addExecutor(&executor2);
-  st::Everything::addExecutor(&executor3);
-  st::Everything::addExecutor(&executor4);
 
   //*****************************************************************************
   //Initialize each of the devices which were added to the Everything Class
